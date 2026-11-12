@@ -212,37 +212,48 @@ def simulate(task, hist, P, sims, seed):
     return ids, counts
 
 
-def forecast(task, hist, P=PARAMS, sims=SIMS, seed=SEED):
-    places = normalize_task(task)['places']
-    if not hist:
-        return {'probabilities': [], 'top10': []}
-    task = normalize_task(task)
-    ids, counts = simulate(task, hist, P, sims, seed)
+def place_rows(counts_k, ids, sims, fl):
+    """Rows (universe_id, p) for one place: floor-mixed occupancy, top MAX_ROWS, rounded down."""
     G = len(ids)
-    fl = min(max(P['floor'], 1e-4), 0.2)
-    probs = []
-    for k in range(places):
-        row = [((1 - fl) * counts[k][g] / sims + fl / G, g) for g in range(G)]
-        row.sort(key=lambda z: (-z[0], ids[z[1]]))
-        rows = [(math.floor(p * 1e6) / 1e6, g) for p, g in row[:MAX_ROWS]]  # floor: sums never exceed 1
-        for p, g in rows:
-            probs.append({'universe_id': ids[g], 'place': k + 1, 'p': p})
-    # top10: greedy assignment by place occupancy, each game used once
+    row = [((1 - fl) * counts_k[g] / sims + fl / G, g) for g in range(G)]
+    row.sort(key=lambda z: (-z[0], ids[z[1]]))
+    rows = [(ids[g], math.floor(p * 1e6) / 1e6) for p, g in row[:MAX_ROWS]]
+    total = sum(p for _, p in rows)
+    if total > 1.0:
+        rows = [(u, math.floor(p / total * 1e6) / 1e6) for u, p in rows]
+    return rows
+
+
+def pick_top10(counts, ids, places, fallback_order):
+    """Greedy most-frequent game per place, each game once; pad from the last chart's order."""
     taken, top = set(), []
     for k in range(places):
-        cand = [g for g in range(G) if g not in taken]
+        cand = [g for g in range(len(ids)) if g not in taken]
         if not cand:
             break
         best = max(cand, key=lambda g: (counts[k][g], -g))
         taken.add(best)
         top.append(ids[best])
-    # pad with the last chart's order if the chart is shorter than `places`
-    for u in hist[-1]['ids']:
+    for u in fallback_order:
         if len(top) >= places:
             break
         if u not in top:
             top.append(u)
-    return {'probabilities': probs, 'top10': top}
+    return top
+
+
+def forecast(task, hist, P=PARAMS, sims=SIMS, seed=SEED):
+    task = normalize_task(task)
+    places = task['places']
+    if not hist:
+        return {'probabilities': [], 'top10': []}
+    ids, counts = simulate(task, hist, P, sims, seed)
+    fl = min(max(P['floor'], 1e-4), 0.2)
+    probs = []
+    for k in range(places):
+        for u, p in place_rows(counts[k], ids, sims, fl):
+            probs.append({'universe_id': u, 'place': k + 1, 'p': p})
+    return {'probabilities': probs, 'top10': pick_top10(counts, ids, places, hist[-1]['ids'])}
 
 
 def main():
