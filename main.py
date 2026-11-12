@@ -7,7 +7,7 @@ import json
 import math
 import os
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 
 PARAMS = dict(c0=0.4, b_tr=0.1263, b_gr=-0.44, b_age=0.05, A0=5.5, b_pl=-0.15, b_x=-0.18,
               s0=0.35, gam=0.6, nu=4.0, lam=1.2, mnew=2.0, snew=0.55, vnew=-0.1,
@@ -66,9 +66,29 @@ def parse_read(o):
     return {'t': t, 'ids': ids, 'play': play} if ids else None
 
 
+def normalize_task(task):
+    """Validate task.json; fall back to history_until + 72 h when the window is missing."""
+    if not isinstance(task, dict):
+        raise ValueError('task.json must be an object')
+    w = task.get('window') if isinstance(task.get('window'), dict) else {}
+    start = w.get('from') or task.get('history_until')
+    if not start:
+        raise ValueError('task.json has no window.from or history_until')
+    t0 = ts(start)
+    t1 = ts(w['until']) if w.get('until') else t0 + 72 * 3600
+    if t1 <= t0:
+        t1 = t0 + 72 * 3600
+    places = _int(task.get('places')) or DEFAULT_PLACES
+    out = dict(task)
+    out['window'] = dict(w, **{'from': start, 'until': datetime.fromtimestamp(t1, timezone.utc).isoformat()})
+    out['places'] = max(1, min(places, 10))
+    out.setdefault('output', 'forecast.json')
+    return out
+
+
 def load(input_dir):
     with open(os.path.join(input_dir, 'task.json'), encoding='utf-8') as f:
-        task = json.load(f)
+        task = normalize_task(json.load(f))
     reads = []
     with open(os.path.join(input_dir, 'history.ndjson'), encoding='utf-8') as f:
         for line in f:
@@ -161,7 +181,7 @@ def simulate(task, hist, P, sims, seed):
     """Return (ids, counts[place][game]) of place occupancy over `sims` runs."""
     T = ts(task['window']['from'])
     span_h = max((ts(task['window']['until']) - T) / 3600, 1.0)
-    places = int(task.get('places', DEFAULT_PLACES))
+    places = task['places']
     F = features(hist, T, P)
     G = len(F)
     ids = [f[0] for f in F]
@@ -193,9 +213,10 @@ def simulate(task, hist, P, sims, seed):
 
 
 def forecast(task, hist, P=PARAMS, sims=SIMS, seed=SEED):
-    places = int(task.get('places', DEFAULT_PLACES))
+    places = normalize_task(task)['places']
     if not hist:
         return {'probabilities': [], 'top10': []}
+    task = normalize_task(task)
     ids, counts = simulate(task, hist, P, sims, seed)
     G = len(ids)
     fl = min(max(P['floor'], 1e-4), 0.2)
@@ -228,6 +249,8 @@ def main():
     inp = os.environ.get('MAKEFUN_INPUT_DIR', '/input')
     outd = os.environ.get('MAKEFUN_OUTPUT_DIR', '/output')
     task, hist = load(inp)
+    if not hist:
+        raise SystemExit('history.ndjson holds no usable read')
     fc = forecast(task, hist)
     os.makedirs(outd, exist_ok=True)
     with open(os.path.join(outd, task.get('output', 'forecast.json')), 'w', encoding='utf-8') as f:
